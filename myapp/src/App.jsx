@@ -1,4 +1,4 @@
-import { useState, useEffect, useContext, createContext, useMemo, useCallback, useReducer, memo, useRef } from "react";
+import { useState, useEffect, useContext, createContext, useMemo, useCallback, useReducer, memo, useRef, Component } from "react";
 
 // ═══════════════════════════════════════════════
 // GAME CONFIG
@@ -70,13 +70,27 @@ const GameContext = createContext(null);
 const useGame = () => useContext(GameContext);
 
 // ═══════════════════════════════════════════════
-// STORAGE
+// STORAGE — localStorage (works everywhere)
 // ═══════════════════════════════════════════════
-async function saveState(state) {
-  try { await window.storage.set("qm_v1", JSON.stringify({ player: state.player, tasks: state.tasks, completedTasks: state.completedTasks })); } catch (_) {}
+const STORAGE_KEY = "qm_v1";
+
+function saveState(state) {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({
+      player: state.player,
+      tasks: state.tasks,
+      completedTasks: state.completedTasks,
+    }));
+  } catch (_) {}
 }
-async function loadState() {
-  try { const r = await window.storage.get("qm_v1"); return r ? JSON.parse(r.value) : null; } catch (_) { return null; }
+
+function loadState() {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (_) {
+    return null;
+  }
 }
 
 // ═══════════════════════════════════════════════
@@ -439,7 +453,7 @@ function AchievementsView() {
 }
 
 // ═══════════════════════════════════════════════
-// AI ADVISOR VIEW  ─ FIXED
+// AI ADVISOR VIEW
 // ═══════════════════════════════════════════════
 function AIAdvisorView() {
   const { state } = useGame();
@@ -449,43 +463,51 @@ function AIAdvisorView() {
   ]);
   const [input, setInput] = useState("");
   const [error, setError] = useState(null);
+  const [apiKey, setApiKey] = useState(() => localStorage.getItem("qm_api_key") || import.meta.env.VITE_ANTHROPIC_API_KEY || "");
+  const [showKeyInput, setShowKeyInput] = useState(false);
   const bottomRef = useRef(null);
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [msgs]);
 
+  const saveApiKey = useCallback((key) => {
+    setApiKey(key);
+    localStorage.setItem("qm_api_key", key);
+    setShowKeyInput(false);
+  }, []);
+
   const send = useCallback(async () => {
     if (!input.trim() || loading) return;
+    if (!apiKey) { setShowKeyInput(true); return; }
     const txt = input.trim();
     setInput("");
     setError(null);
 
-    // Add user message immediately
     const nextMsgs = [...msgs, { role: "user", text: txt }];
     setMsgs(nextMsgs);
     setLoading(true);
 
     try {
       const lvl = calcLevel(state.player.totalXp);
-
       const systemPrompt = `You are a wise RPG quest advisor inside a gamified productivity app called Quest Master.
 The player is Level ${lvl} with ${state.player.totalXp} XP total, a ${state.player.streak}-day streak,
 ${state.tasks.length} active quests, and ${state.completedTasks.length} quests completed.
 Speak in a fun, motivating RPG fantasy style with occasional medieval flair.
 Keep responses to 2-4 sentences max. Be specific, actionable, and energizing.`;
 
-      // Build full conversation history for the API (skip opening AI greeting)
       const apiMessages = nextMsgs
         .slice(1)
-        .map((m) => ({
-          role: m.role === "user" ? "user" : "assistant",
-          content: m.text,
-        }));
+        .map((m) => ({ role: m.role === "user" ? "user" : "assistant", content: m.text }));
 
       const res = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": apiKey,
+          "anthropic-version": "2023-06-01",
+          "anthropic-dangerous-direct-browser-access": "true",
+        },
         body: JSON.stringify({
           model: "claude-sonnet-4-5",
           max_tokens: 300,
@@ -500,29 +522,45 @@ Keep responses to 2-4 sentences max. Be specific, actionable, and energizing.`;
       }
 
       const data = await res.json();
-      const reply =
-        data.content
-          ?.filter((c) => c.type === "text")
-          .map((c) => c.text)
-          .join("") || "The oracle is silent...";
-
-      setMsgs((m) => [...m, { role: "ai", text: reply }]);
+      const reply = data.content?.filter(c => c.type === "text").map(c => c.text).join("") || "The oracle is silent...";
+      setMsgs(m => [...m, { role: "ai", text: reply }]);
     } catch (e) {
-      const errMsg =
-        e.message?.includes("overloaded") || e.message?.includes("529")
-          ? "⚠️ The oracle is overwhelmed with seekers! Try again in a moment."
-          : `⚠️ My crystal ball is cloudy: ${e.message}`;
+      const errMsg = e.message?.includes("401")
+        ? "⚠️ Invalid API key. Click the key icon to update it."
+        : e.message?.includes("overloaded") || e.message?.includes("529")
+        ? "⚠️ The oracle is overwhelmed! Try again in a moment."
+        : `⚠️ My crystal ball is cloudy: ${e.message}`;
       setError(errMsg);
-      setMsgs((m) => [...m, { role: "ai", text: errMsg }]);
+      setMsgs(m => [...m, { role: "ai", text: errMsg }]);
     } finally {
       setLoading(false);
     }
-  }, [input, loading, msgs, state]);
+  }, [input, loading, msgs, state, apiKey]);
 
   const QUICK = ["Give me 3 quest ideas", "How do I level up faster?", "Motivate me!", "What should I focus on today?"];
 
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "calc(100vh - 220px)", minHeight: 380 }}>
+      {/* API Key Banner */}
+      {(!apiKey || showKeyInput) && (
+        <ApiKeySetup
+          current={apiKey}
+          onSave={saveApiKey}
+          onCancel={() => setShowKeyInput(false)}
+        />
+      )}
+
+      {/* Key icon when key is set */}
+      {apiKey && !showKeyInput && (
+        <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 8 }}>
+          <button onClick={() => setShowKeyInput(true)}
+            title="Update API Key"
+            style={{ background: "none", border: "1px solid #0f2540", borderRadius: 6, padding: "4px 10px", color: "#334d6e", cursor: "pointer", fontSize: 12, fontFamily: "'Rajdhani',sans-serif" }}>
+            🔑 API Key
+          </button>
+        </div>
+      )}
+
       {/* Chat Messages */}
       <div style={{ flex: 1, overflowY: "auto", paddingRight: 4, marginBottom: 12 }}>
         {msgs.map((m, i) => (
@@ -553,7 +591,7 @@ Keep responses to 2-4 sentences max. Be specific, actionable, and energizing.`;
           <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 0 6px 41px" }}>
             <span style={{ color: "#334d6e", fontFamily: "'Rajdhani',sans-serif", fontSize: 13 }}>Consulting the oracle</span>
             <div style={{ display: "flex", gap: 4 }}>
-              {[0, 1, 2].map((i) => (
+              {[0, 1, 2].map(i => (
                 <div key={i} style={{ width: 7, height: 7, borderRadius: "50%", background: "#f59e0b", animation: `pulse 0.8s ${i * 0.2}s infinite` }} />
               ))}
             </div>
@@ -566,7 +604,6 @@ Keep responses to 2-4 sentences max. Be specific, actionable, and energizing.`;
             <button onClick={() => setError(null)} style={{ background: "none", border: "none", color: "#4a6080", cursor: "pointer", fontSize: 16, padding: "0 4px" }}>✕</button>
           </div>
         )}
-
         <div ref={bottomRef} />
       </div>
 
@@ -586,7 +623,7 @@ Keep responses to 2-4 sentences max. Be specific, actionable, and energizing.`;
       <div style={{ display: "flex", gap: 9 }}>
         <input value={input} onChange={e => setInput(e.target.value)}
           onKeyDown={e => e.key === "Enter" && !e.shiftKey && send()}
-          placeholder="Ask your quest advisor..."
+          placeholder={apiKey ? "Ask your quest advisor..." : "Set your API key first..."}
           style={{ ...IS, flex: 1 }}
           disabled={loading} />
         <button onClick={send} disabled={loading || !input.trim()}
@@ -599,9 +636,43 @@ Keep responses to 2-4 sentences max. Be specific, actionable, and energizing.`;
 }
 
 // ═══════════════════════════════════════════════
+// API KEY SETUP
+// ═══════════════════════════════════════════════
+function ApiKeySetup({ current, onSave, onCancel }) {
+  const [val, setVal] = useState(current || "");
+  return (
+    <div style={{ background: "#071220", border: "1px solid #f59e0b44", borderRadius: 11, padding: 18, marginBottom: 16 }}>
+      <div style={{ color: "#f59e0b", fontFamily: "'Press Start 2P',monospace", fontSize: 9, marginBottom: 10 }}>🔑 ANTHROPIC API KEY</div>
+      <p style={{ color: "#4a6080", fontFamily: "'Rajdhani',sans-serif", fontSize: 13, marginBottom: 12, lineHeight: 1.5 }}>
+        The AI Advisor needs your Anthropic API key. Get one free at{" "}
+        <a href="https://console.anthropic.com" target="_blank" rel="noreferrer" style={{ color: "#f59e0b" }}>console.anthropic.com</a>.
+        Your key is stored only in your browser's localStorage.
+      </p>
+      <div style={{ display: "flex", gap: 9 }}>
+        <input
+          type="password"
+          value={val}
+          onChange={e => setVal(e.target.value)}
+          placeholder="sk-ant-..."
+          style={{ ...IS, flex: 1 }}
+          onKeyDown={e => e.key === "Enter" && val.trim() && onSave(val.trim())}
+        />
+        <button onClick={() => val.trim() && onSave(val.trim())}
+          style={{ ...BS, background: "linear-gradient(135deg,#92400e,#f59e0b)", color: "#000", whiteSpace: "nowrap" }}>
+          Save Key
+        </button>
+        {current && <button onClick={onCancel}
+          style={{ ...BS, background: "transparent", border: "1px solid #1e3a5f", color: "#64748b" }}>
+          Cancel
+        </button>}
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════
 // ERROR BOUNDARY
 // ═══════════════════════════════════════════════
-import { Component } from "react";
 class ErrorBoundary extends Component {
   state = { error: null };
   static getDerivedStateFromError(e) { return { error: e }; }
@@ -633,7 +704,9 @@ export default function App() {
   const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
-    loadState().then(saved => { if (saved) dispatch({ type: "LOAD_STATE", payload: saved }); setLoaded(true); });
+    const saved = loadState();
+    if (saved) dispatch({ type: "LOAD_STATE", payload: saved });
+    setLoaded(true);
   }, []);
 
   useEffect(() => { if (loaded) saveState(state); }, [state.player, state.tasks, state.completedTasks, loaded]);
